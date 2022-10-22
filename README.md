@@ -1,1 +1,1 @@
-# sea_anemones
+# Deep-sea sea anemone genome
