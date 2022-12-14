@@ -1,1 +1,1 @@
-# Deep-sea sea anemone genome
+# Deep-sea hydrothermal vents sea anemone alvinactis sp. genome
