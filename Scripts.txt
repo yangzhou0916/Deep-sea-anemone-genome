@@ -1,0 +1,169 @@
+#scripts and code used in analysis of alvinactis sp. genome
+
+# Clean the Illumina reads with fastp
+~/opt/biosoft/fastp/fastp -n 0 -w 16 -i *_1.fq.gz -o *_1.fq.clean.gz -I *_2.fq.gz -O *_2.fq.clean.gz
+# Genome survey using SOAPec
+~/opt/biosoft/SOAPec/bin/KmerFreq_HA -k 21 -t 50 -p alvinactis -l reads.lst -L 150 >kmerfreq.log 2>kmerfreq.err
+
+
+#Clean the nanopore reads with ontbc
+~/opt/biosoft/ontbc/ontbc.py clean alvinactis.nanopore.fastq > alvinactis.nanopore.clean.fastq
+#Nanopore reads Assembly
+~/opt/biosoft/NextDenovo/bin/seq_count -g 560Mb -d 56 input.fofn
+~/opt/python-2.7.9/bin/python ~/opt/biosoft/NextDenovo/nextDenovo run.cfg 
+
+#Using purge_haplotigs to remove redundant
+~/opt/biosoft/samtools/bin/samtools faidx alvinactis.contig.fa
+~/opt/biosoft/minimap2/bin/minimap2 -x map-ont -d alvinactis.contig.fa.mmi alvinactis.contig.fa
+~/opt/biosoft/minimap2/bin/minimap2 -a -t 40 -x map-ont alvinactis.contig.fa alvinactis.nanopore.clean.fastq| samtools sort - -m 2g -@ 30 -o genome.lgs.bam
+~/opt/biosoft/samtools/bin/samtools index -@ 40 genome.lgs.bam  
+~/opt/biosoft/purge_haplotigs/bin/purge_haplotigs readhist -b genome.lgs.bam -g genome.lgspolish.fa -t 20
+~/opt/biosoft/purge_haplotigs/bin/purge_haplotigs contigcov -i aligned.bam.genecov -o coverage_stats.csv -l low_cutoff -m mid_cutoff  -h high_cutoff
+~/opt/biosoft/purge_haplotigs/bin/purge_haplotigs purge  -g nextgraph05.assembly.contig.fasta -c coverage_stats.csv -b genome.lgs.bam -t 14 -a 70 #75/60
+#use Nextpolish to polish the genome
+~/opt/biosoft/NextPolish/nextPolish run.cfg
+
+# using HiCpro to assess the quality of HiC library 
+~/opt/biosoft/samtools/samtools faidx alvinactis.polish.fa
+python ~/opt/biosoft/HiC-Pro-2.11.1/bin/utils/digest_genome.py -r mboi -o MboI_resfrag_alvinactis.bed alvinactis.polish.fa
+~/opt/biosoft/bowtie2/bowtie2-build alvinactis.polish.fa alvinactis --threads 40
+~/opt/biosoft/HiC-Pro-2.11.1/bin/HiC-Pro -i ~/data/ -o ~/result -c ~/config-hicpro.txt
+#Using Juicer pipeline to process HI-C valid reads
+awk '{print $1"\t"$2}' alvinactis.polish.fa.fai > alvinactis.fa.size
+sh ./juicer.sh -g alvinactis.polish.fa -s MboI -z ./reference/alvinactis.polish.fa -y ./restriction_sites/alvinactis.polish.fa_MboI.txt -p reference/alvinactis.polish.fa.size -t 50 -D ./Juicer -d ./Juicer
+
+# genomic scaffolding with 3D-dna pipeline
+~/opt/biosoft/3d-dna/run-asm-pipeline.sh -m haploid -i 15000 -r 5 ./Juicer/reference/alvinactis.polish.fa ./alvinactis.merged_nodups.txt
+~/opt/biosoft/3d-dna/run-asm-pipeline-post-review.sh -r alvinactis.review.assembly  ./alvinactis.polish.fa ./alvinactis.merge_nodups.txt
+
+# using BUSCO 4.0 to check the genome completeness
+python3 ~/opt/biosoft/busco/bin/busco -i alvinactis.hic.fa -o alvinactis -f -m geno -l ~/opt/biosoft/busco/database/metazoa_odb10/ -c 60
+
+
+# de novo transcriptome assembly by Trinity and Translig
+~/opt/biosoft/trinityrnaseq/Trinity -seqType fq --max_memory 100G --CPU 40 --left alvinactis_trans_1.fq --right alvinactis_trans_2.fq 
+~/opt/biosoft/cd-hit/cd-hit-est -T 10 -i alvinactis_trinity.fasta -o alvinactis_trinity.0.95.fasta -c 0.95 
+~/opt/biosoft/TransLiG/TransLiG -s fq -p pair -l alvinactis_trans_1.fq -r alvinactis_trans_2.fq -o ./TransLiG_Out_Dir/ 
+
+
+# Repeat Sequences annotation
+~/opt/biosoft/RepeatModeler-2.0/BuildDatabase -name alvinactis -engine ncbi alvinactis.hic.fa
+~/opt/biosoft/RepeatModeler-2.0.1/RepeatModeler -database alvinactis -pa 40
+~/opt/biosoft/RepeatMasker/RepeatMasker -e ncbi -pa 28 -lib ./RM_115699.*22/consensi.fa.classified -dir ./ -gff alvinactis.hic.fa
+~/opt/biosoft/RepeatMasker/RepeatMasker -pa 20 -species Actinoscyphiidae -nolow -norna -no_is -dir ./ -gff alvinactis.hic.fa
+~/opt/biosoft/RepeatMasker/trf alvinactis.hic.fa 2 7 7 80 10 50 500 -d -h
+perl ~/opt/biosoft/Parsing-RepeatMasker-Outputs-master/parseRM.pl -i alvinactis.hic.out -l 50,1 
+
+# Gene annotation
+~/opt/biosoft/augustus/bin/augustus --species=nematostella_vectensis --uniqueGeneId=true chr1.fa > chr1.gff
+~/opt/biosoft/GlimmerHMM/bin/glimmerhmm_linux_x86_64 chr_1.fa ~/opt/biosoft/GlimmerHMM/trained_dir/Celegans -o chr_1.gff -g -f
+~/opt/biosoft/blast-2.2.31/bin/tblastn -query homologous.pep -db alvinactis.hic.fa -out homologous.pep.out -evalue 1e-4 -outfmt 6
+~/opt/biosoft/exonerate-2.2.0/bin/exonerate --model protein2genome --percent 50 homologous.chr_1.fa chr_1.fa --showtargetgff --showalignment F --showvulgar F --softmasktarget T > chr1.gff
+~/opt/biosoft/PASApipeline-v2.3.3/scripts/Launch_PASA_pipeline.pl -c alignAssembly.config -t transcripts.fasta -C -R -g genome_sample.fasta --ALIGNERS blat,gmap --CPU 2 --TDN tdn.accs --cufflinks_gtf cufflinks.gtf
+~/opt/biosoft/PASApipeline-v2.3.3/scripts/build_comprehensive_transcriptome.dbi -c alignAssembly.config -t transcripts.fasta --min_per_ID 95 --min_per_aligned 30
+perl ~/opt/biosoft/EVidenceModeler/EVidenceModeler-1.1.1/evidence_modeler.pl --genome chr_1.fa --weights weight.txt  --gene_predictions ab_initio.gff --protein_alignments homolog.gff --transcript_alignments transcript.gff > chr1.evm.gff
+
+# Function annotation of genome 
+diamond blastp -d nr.dmnd -q alvinactis.pep -out alvinactis.pep.nr.out --outfmt 0 -b20  --tmpdir /dev/shm
+~/opt/biosoft/interproscan/interproscan-5.59-91.0/interproscan.sh -dp -cpu 80 -d . -i alvinactis.pep -t p -iprlookup -goterms -appl TIGRFAM,SFLD,SUPERFAMILY,PANTHER,Gene3D,Hamap,ProSiteProfiles,Coils,SMART,CDD,PRINTS,ProSitePatterns -f TSV,GFF3,XML
+~/opt/biosoft/miniconda3/envs/pfam_scan/bin/pfam_scan.pl -fasta alvinactis.pep -outfile alvinactis.pep.results -dir ~/opt/biosoft/Pfam/2021
+diamond blastp -d SwissProt.dmnd -q alvinactis.pep --threads 30 -e 1e-10 -o alvinactis.pep.SwissProt.out --outfmt 0 -b20 -c1
+
+# gene expression
+~/opt/biosoft/hisat2/hisat2-2.1.0/hisat2-build -p 20 alvinactis.hic.fa alvinactis
+~/opt/biosoft/stringtie/stringtie *_1.clean.fq.gz.bam -G alvinactis.gff  -o *_1.clean.fq.gz.gtf -p 46 -e >stringtie.out 2>&1
+~/opt/biosoft/stringtie/stringtie *.bam -G alvinactis.gff -p 40  -e -b ./ -o ./*.gtf > ./*.out
+
+# Found orthologue genes using Orthofinder
+~/opt/biosoft/OrthoFinder/orthofinder.py -f ./00.orthofinde -a 60 -t 60 -M msa -I 1.5 -S blast_gz
+
+# phylogenetic analysis
+~/opt/biosoft/miniconda3/bin/clustalw2 -INFILE=connect.cds.fa -CONVERT -TYPE=DNA -OUTFILE=connect.cds.fa.PHYLIP  -OUTPUT=PHYLIP
+~/opt/biosoft/miniconda3/bin/raxmlHPC-PTHREADS -s connect.cds.fa.PHYLIP -n connect.cds.fa.PHYLIP -m GTRGAMMA -f a -x 12345 -N 1000 -p 12345 -T 30 -o hvu
+~/opt/biosoft/iqtree/bin/iqtree -s connect.cds.fa -nt AUTO -spp ./example.partitions -m MFP -alrt 1000 -o hvu -pre cds_ML_alrt -nt 20
+
+# Timetree
+~/opt/biosoft/paml4.9j/bin//baseml baseml.ctl
+~/opt/biosoft/paml4.9j/bin/mcmctree mcmctree.3.ctl
+
+
+#Gene family analysis using CAFE 
+python cafetutorial_mcl2rawcafe.py -i mclOutput -o unfiltered_cafe_input.txt -sp "hvu nve act sca alvinactis psp dli epa fsp ofa gas spi pda plu gfa adi ate rmu xsp dgi"
+python cafetutorial_clade_and_size_filter.py -i unfiltered_cafe_input.txt -o filtered_cafe_input.txt -s
+#run1
+load -i filtered_cafe_input.txt -t 30 -l reports/log_run1.txt
+
+tree (((rmu:4.330623,(dgi:3.215959,xsp:3.215959):1.114664):1.999579,(((nve:3.333943,sca:3.333943):1.070369,(ate:3.640508,((SY134HK01:1.909496,psp:1.909496):0.92292,(dli:2.383819,epa:2.383819):0.448598):0.808092):0.763803):1.088391,(((spi:1.059079,pda:1.059079):2.820185,(fsp:2.765629,(ofa:1.256874,gas:1.256874):1.508755):1.113635):0.541782,(plu:3.670376,(gfa:3.238124,(adi:0.411083,act:0.411083):2.827041):0.432252):0.750669):1.071657):0.837499):0.108789,hvu:6.438991);
+lambda -s 
+report reports/report_run1
+#run2
+load -i filtered_cafe_input.txt -t 32 -l reports/log_run2.txt 
+
+tree (((rmu:4.330623,(dgi:3.215959,xsp:3.215959):1.114664):1.999579,(((nve:3.333943,sca:3.333943):1.070369,(ate:3.640508,((SY134HK01:1.909496,psp:1.909496):0.92292,(dli:2.383819,epa:2.383819):0.448598):0.808092):0.763803):1.088391,(((spi:1.059079,pda:1.059079):2.820185,(fsp:2.765629,(ofa:1.256874,gas:1.256874):1.508755):1.113635):0.541782,(plu:3.670376,(gfa:3.238124,(adi:0.411083,act:0.411083):2.827041):0.432252):0.750669):1.071657):0.837499):0.108789,hvu:6.438991);
+
+lambda -l 0.10634117984834 
+report reports/report_run2
+
+#PSMC
+~/opt/biosoft/samtools/bin/samtools index -@ 40 alvinactis.bam alvinactis.bam.bai
+~/opt/biosoft/bwa/bin/bwa index alvinactis.fa
+~/opt/biosoft/samtools/bin/samtools dict alvinactis.fa > alvinactis.dict
+~/opt/biosoft/samtools/bcftools/bin/bcftools mpileup -q 20 -Q 20 -r SY134_9 --ignore-RG -f alvinactis.fa alvinactis.bam | ~/opt/biosoft/samtools/bcftools/bin/bcftools call -c | ~/opt/biosoft/samtools/bcftools/bin/vcfutils.pl vcf2fq - | gzip - > alvinactis.dilpoid.fq.gz
+~/opt/biosoft/samtools/bcftools/bin/bcftools mpileup -I -f alvinactis.fa alvinactis.bam > mpileup.vcf 
+~/opt/biosoft/psmc/utils/fq2psmcfa -q 20 diploid.fq.gz > diploid.psmcfa
+~/opt/biosoft/psmc/utils/splitfa ./diploid.psmcfa > ./split.fa
+~/opt/biosoft/psmc/psmc -N25 -t15 -r5 -b -p "4+25*2+4+6" -o diploid.psmc diploid.psmcfa
+perl ~/opt/biosoft/psmc/utils/psmc_plot.pl -u Mutationrate -g generation -p sample_plot sample.psmc
+
+#macrosynteny 
+diamond makedb --in alvinactis.pep -d nve.pep --threads 60
+diamond blastp -d alvinactis.pep -q nve.pep -o alvinactis.nve.blast --threads 60
+~/opt/biosoft/NGenomeSyn-0.22/bin/NGenomeSyn -InConfi in.cofi -OutPut cnidaria
+
+python3 -m jcvi.formats.gff bed --type=mRNA --key=ID alvinactis.gff -o alvinactis.bed
+~/opt/biosoft/blast-2.2.31/bin/makeblastdb -in alvinactis.pep -dbtype prot
+~/opt/biosoft/blast-2.2.31/bin/blastp -query nve.pep -db alvinactis.pep -out nve.alvinactis.blast -evalue 1e-10 -num_threads 30 -outfmt 6 -num_alignments 5
+python3 -m jcvi.compara.blastfilter --no_strip_names nve.alvinactis.blast --sbed nve.bed --qbed alvinactis.bed
+python3 -m jcvi.graphics.blastplot nve.sy134.blast.filtered --sbed nve.bed --qbed alvinactis.bed
+
+
+
+#circos
+circos.conf
+</ideogram>
+karyotype=karyotype.txt
+<plots>
+<plot>
+        type = histogram #histogram,histogram,histogram
+        file = GC.histogram 
+        fill_color = 135, 102, 69 # Ìî³äÉ«
+        r1   = 0.91r
+        r0   = 0.81r
+    </plot>
+</plots>
+<ideogram>
+
+    <spacing>
+        default = 0.005r
+ </spacing>
+
+    radius           = 0.85r
+    thickness        = 11p
+    fill             = yes
+    show_bands      = yes
+    fill_bands      = yes
+    stroke_color     = dgrey
+    stroke_thickness = 1p
+</ideogram>
+<image>
+    angle_offset* = -90
+    dir* = .
+    radius* = 500p 
+    svg* = yes
+<<include etc/image.conf>>
+</image>
+
+<<include etc/colors_fonts_patterns.conf>>
+<<include etc/housekeeping.conf>>
+
+~/opt/biosoft/circos-0.69-9/bin/circos -conf circos.conf
